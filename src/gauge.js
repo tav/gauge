@@ -4,21 +4,27 @@
 (function() {
 
   var root = this;
-  var isNode = (typeof module !== 'undefined' && module.exports);
+  var isNode = !!(typeof module !== 'undefined' && module.exports);
+  var hasGC = !!(isNode && global.gc);
 
   var clock;
+
+  var PENDING = 1,
+      RUNNING = 2,
+      DONE = 3,
+      FAILED = 4;
 
   if (isNode) {
     var hrtime = process.hrtime;
     clock = function() {
       var time = hrtime();
-      return ((time[0] * 1e9) + time[1])|0;
+      return (time[0] * 1e9) + time[1];
     };
   } else {
     var perf = root.performance;
     if (perf && perf.now) {
       clock = function() {
-        return (perf.now() * 1e6)|0;
+        return perf.now() * 1e6;
       };
     } else {
       var now = Date.now;
@@ -30,7 +36,7 @@
           skew += latest - v + 1;
         }
         latest = v;
-        return ((v + skew) * 1e6)|0;
+        return (v + skew) * 1e6;
       };
     }
   }
@@ -50,37 +56,152 @@
   };
 
   var roundUp = function(n) {
-    var base = roundDown10(n), prospect;
+    var base = roundDown10(n),
+        prospect;
     if (n <= base) {
         return base;
     }
-    if (n <= prospect = (2 * base)) {
-        return prospect
+    if (n <= (prospect = (2 * base))) {
+        return prospect;
     }
-    if (n <= prospect = (5 * base)) {
-        return prospect
+    if (n <= (prospect = (5 * base))) {
+        return prospect;
     }
     return 10 * base;
   };
 
-  var queue = [];
+  var g,
+      queue = [];
 
   var defaultCallback = function(results) {
-    results.forEach(function(result) {
-      console.log(result);
+    if (isNode) {
+      var back = results.length + ("RUNNING ".length);
+      for (var i = 0; i < back; i++) {
+        write('\b');
+      }
+    }
+    results.forEach(function(test) {
+      var resp;
+      if (test.state === DONE) {
+        resp = ['PASS'];
+      } else {
+        resp = ['FAIL'];
+      }
+      if (test.name.length > 24) {
+        resp.push(test.name.slice(0, 20) + " ...");
+      } else {
+        resp.push((test.name + "                        ").slice(0, 24));
+      }
+      resp.push(("            " + test.n).slice(-10));
+      var cost = "" + ((test.elapsed / test.n)|0) + " ns/op";
+      if (cost.length <= 18) {
+        cost = ("            " + cost).slice(-18)
+      }
+      resp.push(cost);
+      console.log(resp.join('  '));
     });
+  };
+
+  var write = function(s) {
+    if (isNode) {
+      process.stdout.write(s);
+    } else {
+      if (s !== '\b') {
+        console.log(s);
+      }
+    }
+  };
+
+  var run = function(g) {
+    var cur,
+        i,
+        last,
+        n,
+        perOp,
+        tests = g._tests,
+        l = tests.length;
+    for (i = g._idx; i < l; i++) {
+      g._idx = i;
+      g._cur = cur = tests[i];
+      if (cur.state === PENDING) {
+        if (i === 0) {
+          write("RUNNING ");
+        }
+        cur.state = RUNNING;
+        runN(g, 1);
+        if (cur.async) {
+          return;
+        }
+      }
+      if (cur.state === RUNNING) {
+        n = cur.n;
+        while (cur.state !== FAILED && cur.elapsed < g._duration && n < 1e9) {
+          last = n;
+          perOp = cur.elapsed / n;
+          // console.log("idx: %s, last: %s, perop: %s", i, last, perOp)
+          if (perOp === 0) {
+            n = 1e9;
+          } else {
+            n = g._duration / perOp;
+            n = roundUp(Math.max(Math.min(n+((n/2)|0), 100*last), last+1));
+          }
+          if (n > 1e9) {
+            n = 1e9;
+          }
+          // console.log('idx: %s, n: %s', i, n)
+          runN(g, n);
+          if (cur.async) {
+            return;
+          }
+        }
+        if (cur.state === RUNNING) {
+          cur.state = DONE;
+        }
+        write('.');
+      }
+    }
+    g._finished = true;
+    g._callback(tests);
+  };
+
+  var tryTest = function(g, test) {
+    try {
+      test.fn(g);
+    } catch (_err) {
+      // TODO(tav): capture the stack trace.
+      test.state = FAILED;
+    }
+  };
+
+  var runN = function(g, n) {
+    if (hasGC) {
+      gc();
+    }
+    var cur = g._cur;
+    g.n = cur.n = n;
+    g.resetTimer();
+    g.startTimer();
+    // cur.fn(g);
+    tryTest(g, cur);
+    if (cur.async) {
+      return;
+    }
+    g.stopTimer();
   };
 
   var gauge = function(tests) {
     Object.keys(tests).forEach(function(key) {
       var fn = tests[key];
       queue.push({
-        auto: fn.length == 0,
-        failed: false,
+        async: fn.length === 2,
+        bytes: 0,
+        done: 0,
+        elapsed: 0,
         fn: fn,
         n: 0,
         name: key,
-        started: false,
+        state: PENDING,
+        traceback: "",
       });
     });
   };
@@ -90,82 +211,64 @@
       opts = {};
     }
     g = new Gauge(opts, callback);
-    g.run();
+    run(g);
+    return g;
   };
 
   var Gauge = function(opts, callback) {
-    var g = {
-      bytes: 0,
-      callback: callback || defaultCallback,
-      duration: ((opts.duration || 1000) * 1e6)|0,
-      elapsed: 0,
-      idx: 0,
-      running: false,
-      start: 0,
-      timeout: opts.timeout || 3000,
-      tests: queue,
-    };
+    this._callback = callback || defaultCallback;
+    this._cur = queue[0];
+    this._duration = (opts.duration || 500) * 1e6;
+    this._finished = false;
+    this._idx = 0;
+    this._running = false;
+    this._start = 0;
+    this._timeout = opts.timeout || 3000;
+    this._tests = queue;
     queue = [];
-  }
+  };
 
   Gauge.prototype = {
 
-    cost: function() {
-      if (this.N <= 0) {
-        return 0;
+    done: function() {
+      var cur = this._cur;
+      cur.done += 1;
+      if (cur.done === cur.n) {
+        this.stopTimer();
+        run(this);
+      } else {
+        // cur.fn(this);
+        tryTest(this, cur);
       }
-      return this.elapsed / this.N;
     },
 
     resetTimer: function() {
-      if (this.running) {
-        this.start = clock();
+      if (this._running) {
+        this._start = clock();
       }
-      this.elapsed = 0;
-      this.bytes = 0;
-    },
-
-    run: function() {
-
-      var n = 1;
-      this.runN(n);
-      while (!this.failed && this.elapsed < this.duration && n < 1e9) {
-        n = Math.max(Math.min(n+((n/2)|0), 100*last), last+1);
-        n = roundUp(n);
-        this.runN(n);
-      }
-    },
-
-    runN: function(n) {
-      // gc()
-      this.N = n;
-      this.resetTimer();
-      this.startTimer();
-      for (var i = 0; i < n; i++) {
-
-      }
-      this.stopTimer();
+      this._cur.elapsed = 0;
+      this._cur.bytes = 0;
     },
 
     setBytes: function(n) {
-      this.bytes = n;
+      this._cur.bytes = n;
     },
 
     startTimer: function() {
-      if (!this.running) {
-        this.running = true;
-        this.start = clock();
+      if (!this._running) {
+        this._running = true;
+        this._start = clock();
       }
     },
 
     stopTimer: function() {
-      if (this.running) {
-        this.running = false;
-        this.elapsed += clock() - g.start;
+      if (this._running) {
+        this._running = false;
+        this._cur.elapsed += clock() - this._start;
       }
     },
 
-  }
+  };
 
   root.gauge = gauge;
   if (isNode) {
