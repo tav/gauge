@@ -70,11 +70,8 @@
     return 10 * base;
   };
 
-  var g,
-      queue = [];
-
-  var defaultCallback = function(results) {
-    if (isNode) {
+  var render = function(results, overwrite) {
+    if (isNode && overwrite) {
       var back = results.length + ("RUNNING ".length);
       for (var i = 0; i < back; i++) {
         write('\b');
@@ -148,7 +145,6 @@
           if (n > 1e9) {
             n = 1e9;
           }
-          // console.log('idx: %s, n: %s', i, n)
           runN(g, n);
           if (cur.async) {
             return;
@@ -161,7 +157,10 @@
       }
     }
     g._finished = true;
-    g._callback(tests);
+    render(tests, true);
+    if (g._callback !== void 0) {
+      g._callback(tests);
+    }
   };
 
   var tryTest = function(g, test) {
@@ -181,7 +180,6 @@
     g.n = cur.n = n;
     g.resetTimer();
     g.startTimer();
-    // cur.fn(g);
     tryTest(g, cur);
     if (cur.async) {
       return;
@@ -192,7 +190,7 @@
   var gauge = function(tests) {
     Object.keys(tests).forEach(function(key) {
       var fn = tests[key];
-      queue.push({
+      gauge.queue.push({
         async: fn.length === 2,
         bytes: 0,
         done: 0,
@@ -206,26 +204,29 @@
     });
   };
 
+  gauge.queue = [];
+  gauge.render = render;
+
   gauge.run = function(opts, callback) {
-    if (opts === undefined) {
+    if (opts === void 0) {
       opts = {};
     }
-    g = new Gauge(opts, callback);
+    var g = new Gauge(opts, callback);
     run(g);
     return g;
   };
 
   var Gauge = function(opts, callback) {
-    this._callback = callback || defaultCallback;
-    this._cur = queue[0];
+    this._callback = callback;
+    this._cur = gauge.queue[0];
     this._duration = (opts.duration || 500) * 1e6;
     this._finished = false;
     this._idx = 0;
     this._running = false;
     this._start = 0;
     this._timeout = opts.timeout || 3000;
-    this._tests = queue;
-    queue = [];
+    this._tests = gauge.queue;
+    gauge.queue = [];
   };
 
   Gauge.prototype = {
@@ -237,7 +238,6 @@
         this.stopTimer();
         run(this);
       } else {
-        // cur.fn(this);
         tryTest(this, cur);
       }
     },
