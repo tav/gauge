@@ -1,0 +1,221 @@
+#! /usr/bin/env node --expose_gc
+
+// Public Domain (-) 2014 The Gauge Authors.
+// See the Gauge UNLICENSE file for details.
+
+var express = require('express'),
+    fs = require('fs'),
+    gauge = require('../src/gauge.js'),
+    http = require('http'),
+    minimist = require('minimist'),
+    os = require('os'),
+    path = require('path'),
+    uuid = require('node-uuid'),
+    vm = require('vm'),
+    ws = require('ws');
+
+var app = express(),
+    argv = minimist(process.argv.slice(2), {boolean: ['s', 'server', 'w', 'watch']}),
+    curID = 0,
+    curUUID,
+    files = argv._,
+    seen;
+
+if (argv.version || argv.v) {
+  console.log("gauge 0.1.0");
+  process.exit(0);
+}
+
+if (files.length === 0 || argv.h || argv.help) {
+  console.log("Usage: gauge [<options>] <file>");
+  console.log("");
+  console.log("Options:");
+  console.log("  -h, --help           show this help message and exit");
+  console.log("  -v, --version        show the program's version number and exit");
+  console.log("  -d, --duration TIME  approximate run time in ms for each test [500]");
+  console.log("  -p, --port NUMBER    the port to bind for the web server [4040]");
+  console.log("  -s, --server         run a web server for browser testing");
+  console.log("  -w, --watch          re-run the tests every time the file updates");
+  process.exit(0);
+}
+
+var duration = argv.d || argv.duration || 500;
+var file = files[0];
+var isScript = path.extname(file) === '.js';
+var useServer = argv.s || argv.server;
+
+var getHTML = function() {
+  curUUID = uuid.v4();
+  curID++;
+  seen = {};
+  if (isScript) {
+    return [
+      "<!doctype html>",
+      "<meta charset=utf-8>",
+      "<link href='//fonts.googleapis.com/css?family=Yanone+Kaffeesatz' rel='stylesheet'>",
+      "<style>body {",
+      "  font-family: 'Yanone Kaffeesatz', Helvetica, sans-serif;",
+      "  font-size: 50px; margin: 0; padding: 30px;",
+      "}</style>",
+      "<script>",
+      "var __gauge_id = '" + curUUID + "';",
+      gaugeScript,
+      getSource(),
+      "</script>",
+      "<body>",
+      "Gauge Endpoint",
+      wsScript
+    ].join('\n');
+  } else {
+    return [
+      "<!doctype html>",
+      "<meta charset=utf-8>",
+      "<script>",
+      "var __gauge_id = " + curUUID + ";",
+      gaugeScript,
+      "</script>",
+      getSource(),
+      wsScript
+    ].join('\n');
+  }
+};
+
+var getIP = function() {
+  var dev,
+      i,
+      info,
+      iface,
+      ifaces = os.networkInterfaces(),
+      l;
+  for (dev in ifaces) {
+    iface = ifaces[dev];
+    l = iface.length;
+    for (i = 0; i < l; i++) {
+      info = iface[i];
+      if (info.family === 'IPv4' && info.address !== '127.0.0.1' && !info.internal) {
+        return info.address;
+      }
+    }
+  }
+  return '127.0.0.1';
+};
+
+var getSource = function() {
+  return fs.readFileSync(file, {encoding: 'utf8'});
+};
+
+var runScript = function() {
+  var script = getSource();
+  if (duration) {
+    script += 'gauge.run({duration: ' + duration + '})';
+  } else {
+    script += 'gauge.run()';
+  }
+  vm.runInContext(script, vm.createContext(global));
+};
+
+if (useServer) {
+  var gaugeScript = fs.readFileSync(path.join(__dirname, '../src/gauge.js'), {encoding: 'utf8'});
+  var ip = getIP();
+  var port = argv.p || argv.port || 4040;
+  var addr = ip + ":" + port;
+  var prev = fs.statSync(file).mtime.getTime();
+  var wsScript = [
+    "<script>",
+    "var __gauge_res = void 0;",
+    "var __gauge_do = function() {",
+    "  var __gauge_ws = new WebSocket('ws://" + addr + "/');",
+    "  __gauge_ws.onerror = __gauge_ws.onclose = function() {",
+    "    setTimeout(__gauge_do, 1000);",
+    "  };",
+    "  __gauge_ws.onmessage = function(msg) {",
+    "    if (JSON.parse(msg.data).id !== __gauge_id) {",
+    "      location.reload();",
+    "    }",
+    "  };",
+    "  var __gauge_send = function() {",
+    "    try {",
+    "      __gauge_ws.send(JSON.stringify({browser: navigator.userAgent, id: __gauge_id, results: __gauge_res}));",
+    "    } catch (_err) {",
+    "      __gauge_ws.onerror();",
+    "    }",
+    "  };",
+    "  __gauge_ws.onopen = function() {",
+    "    if (__gauge_res === void 0) {",
+    "      gauge.run({duration: " + duration + "}, function(results) {",
+    "        __gauge_res = results;",
+    "        __gauge_send();",
+    "      });",
+    "    } else {",
+    "      __gauge_send();",
+    "    }",
+    "  };",
+    "};",
+    "setTimeout(__gauge_do, 0);",
+    "</script>",
+  ].join('\n');
+  var curHTML = getHTML();
+  app.get('/', function (req, res) {
+    res.writeHead(200, {'Content-Type': 'text/html'});
+    res.end(curHTML);
+  });
+  app.use(express.static(process.cwd()));
+  var server = http.createServer(app),
+      wss;
+  server.listen(port, ip, function() {
+    wss = new ws.Server({server: server});
+    wss.on('connection', function(ws) {
+      ws.send(JSON.stringify({id: curUUID}));
+      ws.on('message', function(data) {
+        var info = JSON.parse(data);
+        if (info.id !== curUUID) {
+          ws.send(JSON.stringify({id: curUUID}));
+          return;
+        }
+        if (seen[info.browser] === void 0) {
+          console.log('');
+          console.log('[' + curID + '] ' + info.browser);
+          console.log('');
+          gauge.render(info.results, false);
+          seen[info.browser] = true;
+        }
+      });
+    });
+    console.log(">> Point your web browsers at http://" + addr + "/");
+    var runner = function() {
+      cur = fs.statSync(file).mtime.getTime();
+      if (cur !== prev) {
+        prev = cur;
+        curHTML = getHTML();
+        var reload = JSON.stringify({id: curUUID});
+        for (var idx in wss.clients) {
+          wss.clients[idx].send(reload);
+        }
+      }
+      setTimeout(runner, 1000);
+    };
+    setTimeout(runner, 1000);
+  });
+} else {
+  if (!isScript) {
+    console.log("!! ERROR: Testing non-JavaScript files is only supported when -s or --server is specified.");
+    process.exit(1);
+  }
+  if (argv.w || argv.watch) {
+    var cur,
+        prev = fs.statSync(file).mtime.getTime();
+    var runner = function() {
+      cur = fs.statSync(file).mtime.getTime();
+      if (cur !== prev) {
+        prev = cur;
+        console.log('');
+        runScript();
+      }
+      setTimeout(runner, 1000);
+    };
+    runScript();
+    runner();
+  } else {
+    runScript();
+  }
+}
