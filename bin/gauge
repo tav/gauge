@@ -122,6 +122,7 @@ if (useServer) {
   var prev = fs.statSync(file).mtime.getTime();
   var wsScript = [
     "<script>",
+    "(function() {",
     "var __gauge_res = void 0;",
     "var __gauge_do = function() {",
     "  var __gauge_ws = new WebSocket('ws://" + addr + "/');",
@@ -142,16 +143,17 @@ if (useServer) {
     "  };",
     "  __gauge_ws.onopen = function() {",
     "    if (__gauge_res === void 0) {",
-    "      gauge.run({duration: " + duration + "}, function(results) {",
-    "        __gauge_res = results;",
-    "        __gauge_send();",
-    "      });",
-    "    } else {",
-    "      __gauge_send();",
+    "      setTimeout(function() {",
+    "        gauge.run({duration: " + duration + "}, function(results) {",
+    "          __gauge_res = results;",
+    "          __gauge_send();",
+    "        });",
+    "      }, 1000);",
     "    }",
     "  };",
     "};",
     "setTimeout(__gauge_do, 0);",
+    "})();",
     "</script>",
   ].join('\n');
   var curHTML = getHTML();
