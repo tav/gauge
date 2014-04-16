@@ -33,6 +33,7 @@ if (files.length === 0 || argv.h || argv.help) {
   console.log("  -h, --help           show this help message and exit");
   console.log("  -v, --version        show the program's version number and exit");
   console.log("  -d, --duration TIME  approximate run time in ms for each test [500]");
+  console.log("  -i, --include FILE   include the provided js file");
   console.log("  -p, --port NUMBER    the port to bind for the web server [4040]");
   console.log("  -s, --server         run a web server for browser testing");
   console.log("  -w, --watch          re-run the tests every time the file updates");
@@ -40,9 +41,21 @@ if (files.length === 0 || argv.h || argv.help) {
 }
 
 var duration = argv.d || argv.duration || 500;
+var includes = argv.i || argv.includes;
 var file = files[0];
 var isScript = path.extname(file) === '.js';
 var useServer = argv.s || argv.server;
+
+if (includes) {
+  if (!Array.isArray(includes)) {
+    includes = [includes];
+  }
+} else {
+  includes = [];
+}
+
+var watchFiles = includes.slice(0);
+watchFiles.push(file);
 
 var getHTML = function() {
   curUUID = uuid.v4();
@@ -60,7 +73,8 @@ var getHTML = function() {
       "<script>",
       "var __gauge_id = '" + curUUID + "';",
       gaugeScript,
-      getSource(),
+      getIncludes(),
+      read(file),
       "</script>",
       "<body>",
       "Gauge Endpoint",
@@ -71,13 +85,18 @@ var getHTML = function() {
       "<!doctype html>",
       "<meta charset=utf-8>",
       "<script>",
-      "var __gauge_id = " + curUUID + ";",
+      "var __gauge_id = '" + curUUID + "';",
       gaugeScript,
+      getIncludes(),
       "</script>",
-      getSource(),
+      read(file),
       wsScript
     ].join('\n');
   }
+};
+
+var getIncludes = function() {
+  return includes.map(read).join(';\n') + ';\n';
 };
 
 var getIP = function() {
@@ -100,16 +119,22 @@ var getIP = function() {
   return '127.0.0.1';
 };
 
-var getSource = function() {
-  return fs.readFileSync(file, {encoding: 'utf8'});
+var getMtime = function() {
+  return Math.max.apply(Math, watchFiles.map(function(filename) {
+    return fs.statSync(filename).mtime.getTime();
+  }));
+};
+
+var read = function(filename) {
+  return fs.readFileSync(filename, {encoding: 'utf8'});
 };
 
 var runScript = function() {
-  var script = getSource();
+  var script = includes.map(read).join(';\n') + ';\n' + read(file);
   if (duration) {
-    script += 'gauge.run({duration: ' + duration + '})';
+    script += 'gauge.run({duration: ' + duration + '});';
   } else {
-    script += 'gauge.run()';
+    script += 'gauge.run();';
   }
   vm.runInContext(script, vm.createContext(global));
 };
@@ -119,7 +144,7 @@ if (useServer) {
   var ip = getIP();
   var port = argv.p || argv.port || 4040;
   var addr = ip + ":" + port;
-  var prev = fs.statSync(file).mtime.getTime();
+  var prev = getMtime();
   var wsScript = [
     "<script>",
     "(function() {",
@@ -185,8 +210,8 @@ if (useServer) {
     });
     console.log(">> Point your web browsers at http://" + addr + "/");
     var runner = function() {
-      cur = fs.statSync(file).mtime.getTime();
-      if (cur !== prev) {
+      cur = getMtime();
+      if (cur > prev) {
         prev = cur;
         curHTML = getHTML();
         var reload = JSON.stringify({id: curUUID});
@@ -205,10 +230,10 @@ if (useServer) {
   }
   if (argv.w || argv.watch) {
     var cur,
-        prev = fs.statSync(file).mtime.getTime();
+        prev = getMtime();
     var runner = function() {
-      cur = fs.statSync(file).mtime.getTime();
-      if (cur !== prev) {
+      cur = getMtime();
+      if (cur > prev) {
         prev = cur;
         console.log('');
         runScript();
