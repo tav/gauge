@@ -7,7 +7,8 @@
   var isNode = !!(typeof module !== 'undefined' && module.exports);
   var hasGC = !!(isNode && global.gc);
 
-  var clock;
+  var clock,
+      highPrecision = true;
 
   var PENDING = 1,
       RUNNING = 2,
@@ -27,6 +28,7 @@
         return perf.now() * 1e6;
       };
     } else {
+      highPrecision = false;
       var now = Date.now;
       var latest = now();
       var skew = 0;
@@ -137,10 +139,18 @@
           perOp = cur.elapsed / n;
           // console.log("idx: %s, last: %s, perop: %s", i, last, perOp)
           if (perOp === 0) {
-            n = 1e9;
+            if (highPrecision) {
+              n = 1e9;
+            } else {
+              n = roundUp(last+1);
+            }
           } else {
             n = g._duration / perOp;
-            n = roundUp(Math.max(Math.min(n+((n/2)|0), 100*last), last+1));
+            if (highPrecision) {
+              n = roundUp(Math.max(Math.min(n+((n/2)|0), 100*last), last+1));
+            } else {
+              n = roundUp(100*last);
+            }
           }
           if (n > 1e9) {
             n = 1e9;
