@@ -16,6 +16,7 @@ var express = require('express'),
 
 var app = express(),
     argv = minimist(process.argv.slice(2), {boolean: ['s', 'server', 'w', 'watch']}),
+    browsers = {},
     curID = 0,
     curUUID,
     files = argv._,
@@ -148,36 +149,41 @@ if (useServer) {
   var wsScript = [
     "<script>",
     "(function() {",
-    "var __gauge_res = void 0;",
-    "var __gauge_do = function() {",
-    "  var __gauge_ws = new WebSocket('ws://" + addr + "/');",
-    "  __gauge_ws.onerror = __gauge_ws.onclose = function() {",
-    "    setTimeout(__gauge_do, 1000);",
+    "var reloaded = false;",
+    "var results = void 0;",
+    "var run = function() {",
+    "  var ws = new WebSocket('ws://" + addr + "/');",
+    "  ws.onerror = ws.onclose = function() {",
+    "    reloaded = true;",
+    "    setTimeout(run, 1500);",
     "  };",
-    "  __gauge_ws.onmessage = function(msg) {",
+    "  ws.onmessage = function(msg) {",
     "    if (JSON.parse(msg.data).id !== __gauge_id) {",
     "      location.reload();",
     "    }",
     "  };",
-    "  var __gauge_send = function() {",
+    "  var send = function() {",
     "    try {",
-    "      __gauge_ws.send(JSON.stringify({browser: navigator.userAgent, id: __gauge_id, results: __gauge_res}));",
+    "      ws.send(JSON.stringify({browser: navigator.userAgent, id: __gauge_id, results: results}));",
     "    } catch (_err) {",
-    "      __gauge_ws.onerror();",
+    "      ws.onerror();",
     "    }",
     "  };",
-    "  __gauge_ws.onopen = function() {",
-    "    if (__gauge_res === void 0) {",
+    "  ws.onopen = function() {",
+    "    ws.send(JSON.stringify({browser: navigator.userAgent}));",
+    "    if (results === void 0 && !reloaded) {",
     "      setTimeout(function() {",
-    "        gauge.run({duration: " + duration + "}, function(results) {",
-    "          __gauge_res = results;",
-    "          __gauge_send();",
-    "        });",
+    "        if (!reloaded) {",
+    "          gauge.run({duration: " + duration + "}, function(res) {",
+    "            results = res;",
+    "            send();",
+    "          });",
+    "        }",
     "      }, 1000);",
     "    }",
     "  };",
     "};",
-    "setTimeout(__gauge_do, 0);",
+    "setTimeout(run, 0);",
     "})();",
     "</script>",
   ].join('\n');
@@ -195,6 +201,14 @@ if (useServer) {
       ws.send(JSON.stringify({id: curUUID}));
       ws.on('message', function(data) {
         var info = JSON.parse(data);
+        if (!info.id) {
+          if (browsers[info.browser] === void 0) {
+            console.log('');
+            console.log('>> connected: ' + info.browser);
+            browsers[info.browser] = true;
+          }
+          return;
+        }
         if (info.id !== curUUID) {
           ws.send(JSON.stringify({id: curUUID}));
           return;
@@ -208,7 +222,7 @@ if (useServer) {
         }
       });
     });
-    console.log(">> Point your web browsers at http://" + addr + "/");
+    console.log("## Point your web browsers at http://" + addr + "/");
     var runner = function() {
       cur = getMtime();
       if (cur > prev) {
